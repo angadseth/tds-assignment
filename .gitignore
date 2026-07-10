@@ -6,7 +6,9 @@ all_metadata.json
 
 # data output files (keep input data, ignore generated output)
 rag_pipeline/results_*.json
+rag_pipeline/results.json
 rag_pipeline/final_results.json
+rag_eval/results.json
 
 # node
 node_modules/
