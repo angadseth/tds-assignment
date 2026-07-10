@@ -1,0 +1,18 @@
+# debug and scratch files
+solve*.py
+solve*.js
+debug*.py
+all_metadata.json
+
+# data output files (keep input data, ignore generated output)
+rag_pipeline/results_*.json
+rag_pipeline/final_results.json
+
+# node
+node_modules/
+
+# misc
+*.zip
+bhushan_downloader/
+rag_pipeline2/
+.agents/

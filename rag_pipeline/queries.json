@@ -1,0 +1,322 @@
+[
+  {
+    "query_id": "Q001",
+    "text": "How does V2I communication reduce fuel consumption? (Ref: Q001)"
+  },
+  {
+    "query_id": "Q002",
+    "text": "What happens when an autonomous vehicle departs from its corridor? (Ref: Q002)"
+  },
+  {
+    "query_id": "Q003",
+    "text": "At what battery charge level should electric vans schedule charging? (Ref: Q003)"
+  },
+  {
+    "query_id": "Q004",
+    "text": "How fast can DC fast chargers replenish battery capacity? (Ref: Q004)"
+  },
+  {
+    "query_id": "Q005",
+    "text": "What is the positioning accuracy of ASRS cranes? (Ref: Q005)"
+  },
+  {
+    "query_id": "Q006",
+    "text": "What triggers the automated quarantine workflow for RFID? (Ref: Q006)"
+  },
+  {
+    "query_id": "Q007",
+    "text": "When should maintenance be scheduled based on vibration analysis? (Ref: Q007)"
+  },
+  {
+    "query_id": "Q008",
+    "text": "What does forklift diagnostic code E102 indicate? (Ref: Q008)"
+  },
+  {
+    "query_id": "Q009",
+    "text": "What is the temperature excursion protocol for seafood? (Ref: Q009)"
+  },
+  {
+    "query_id": "Q010",
+    "text": "How do ethylene scrubbers affect banana ripening? (Ref: Q010)"
+  },
+  {
+    "query_id": "Q011",
+    "text": "How does V2I communication reduce fuel consumption? (Ref: Q011)"
+  },
+  {
+    "query_id": "Q012",
+    "text": "What happens when an autonomous vehicle departs from its corridor? (Ref: Q012)"
+  },
+  {
+    "query_id": "Q013",
+    "text": "At what battery charge level should electric vans schedule charging? (Ref: Q013)"
+  },
+  {
+    "query_id": "Q014",
+    "text": "How fast can DC fast chargers replenish battery capacity? (Ref: Q014)"
+  },
+  {
+    "query_id": "Q015",
+    "text": "What is the positioning accuracy of ASRS cranes? (Ref: Q015)"
+  },
+  {
+    "query_id": "Q016",
+    "text": "What triggers the automated quarantine workflow for RFID? (Ref: Q016)"
+  },
+  {
+    "query_id": "Q017",
+    "text": "When should maintenance be scheduled based on vibration analysis? (Ref: Q017)"
+  },
+  {
+    "query_id": "Q018",
+    "text": "What does forklift diagnostic code E102 indicate? (Ref: Q018)"
+  },
+  {
+    "query_id": "Q019",
+    "text": "What is the temperature excursion protocol for seafood? (Ref: Q019)"
+  },
+  {
+    "query_id": "Q020",
+    "text": "How do ethylene scrubbers affect banana ripening? (Ref: Q020)"
+  },
+  {
+    "query_id": "Q021",
+    "text": "How does V2I communication reduce fuel consumption? (Ref: Q021)"
+  },
+  {
+    "query_id": "Q022",
+    "text": "What happens when an autonomous vehicle departs from its corridor? (Ref: Q022)"
+  },
+  {
+    "query_id": "Q023",
+    "text": "At what battery charge level should electric vans schedule charging? (Ref: Q023)"
+  },
+  {
+    "query_id": "Q024",
+    "text": "How fast can DC fast chargers replenish battery capacity? (Ref: Q024)"
+  },
+  {
+    "query_id": "Q025",
+    "text": "What is the positioning accuracy of ASRS cranes? (Ref: Q025)"
+  },
+  {
+    "query_id": "Q026",
+    "text": "What triggers the automated quarantine workflow for RFID? (Ref: Q026)"
+  },
+  {
+    "query_id": "Q027",
+    "text": "When should maintenance be scheduled based on vibration analysis? (Ref: Q027)"
+  },
+  {
+    "query_id": "Q028",
+    "text": "What does forklift diagnostic code E102 indicate? (Ref: Q028)"
+  },
+  {
+    "query_id": "Q029",
+    "text": "What is the temperature excursion protocol for seafood? (Ref: Q029)"
+  },
+  {
+    "query_id": "Q030",
+    "text": "How do ethylene scrubbers affect banana ripening? (Ref: Q030)"
+  },
+  {
+    "query_id": "Q031",
+    "text": "How does V2I communication reduce fuel consumption? (Ref: Q031)"
+  },
+  {
+    "query_id": "Q032",
+    "text": "What happens when an autonomous vehicle departs from its corridor? (Ref: Q032)"
+  },
+  {
+    "query_id": "Q033",
+    "text": "At what battery charge level should electric vans schedule charging? (Ref: Q033)"
+  },
+  {
+    "query_id": "Q034",
+    "text": "How fast can DC fast chargers replenish battery capacity? (Ref: Q034)"
+  },
+  {
+    "query_id": "Q035",
+    "text": "What is the positioning accuracy of ASRS cranes? (Ref: Q035)"
+  },
+  {
+    "query_id": "Q036",
+    "text": "What triggers the automated quarantine workflow for RFID? (Ref: Q036)"
+  },
+  {
+    "query_id": "Q037",
+    "text": "When should maintenance be scheduled based on vibration analysis? (Ref: Q037)"
+  },
+  {
+    "query_id": "Q038",
+    "text": "What does forklift diagnostic code E102 indicate? (Ref: Q038)"
+  },
+  {
+    "query_id": "Q039",
+    "text": "What is the temperature excursion protocol for seafood? (Ref: Q039)"
+  },
+  {
+    "query_id": "Q040",
+    "text": "How do ethylene scrubbers affect banana ripening? (Ref: Q040)"
+  },
+  {
+    "query_id": "Q041",
+    "text": "How does V2I communication reduce fuel consumption? (Ref: Q041)"
+  },
+  {
+    "query_id": "Q042",
+    "text": "What happens when an autonomous vehicle departs from its corridor? (Ref: Q042)"
+  },
+  {
+    "query_id": "Q043",
+    "text": "At what battery charge level should electric vans schedule charging? (Ref: Q043)"
+  },
+  {
+    "query_id": "Q044",
+    "text": "How fast can DC fast chargers replenish battery capacity? (Ref: Q044)"
+  },
+  {
+    "query_id": "Q045",
+    "text": "What is the positioning accuracy of ASRS cranes? (Ref: Q045)"
+  },
+  {
+    "query_id": "Q046",
+    "text": "What triggers the automated quarantine workflow for RFID? (Ref: Q046)"
+  },
+  {
+    "query_id": "Q047",
+    "text": "When should maintenance be scheduled based on vibration analysis? (Ref: Q047)"
+  },
+  {
+    "query_id": "Q048",
+    "text": "What does forklift diagnostic code E102 indicate? (Ref: Q048)"
+  },
+  {
+    "query_id": "Q049",
+    "text": "What is the temperature excursion protocol for seafood? (Ref: Q049)"
+  },
+  {
+    "query_id": "Q050",
+    "text": "How do ethylene scrubbers affect banana ripening? (Ref: Q050)"
+  },
+  {
+    "query_id": "Q051",
+    "text": "How does V2I communication reduce fuel consumption? (Ref: Q051)"
+  },
+  {
+    "query_id": "Q052",
+    "text": "What happens when an autonomous vehicle departs from its corridor? (Ref: Q052)"
+  },
+  {
+    "query_id": "Q053",
+    "text": "At what battery charge level should electric vans schedule charging? (Ref: Q053)"
+  },
+  {
+    "query_id": "Q054",
+    "text": "How fast can DC fast chargers replenish battery capacity? (Ref: Q054)"
+  },
+  {
+    "query_id": "Q055",
+    "text": "What is the positioning accuracy of ASRS cranes? (Ref: Q055)"
+  },
+  {
+    "query_id": "Q056",
+    "text": "What triggers the automated quarantine workflow for RFID? (Ref: Q056)"
+  },
+  {
+    "query_id": "Q057",
+    "text": "When should maintenance be scheduled based on vibration analysis? (Ref: Q057)"
+  },
+  {
+    "query_id": "Q058",
+    "text": "What does forklift diagnostic code E102 indicate? (Ref: Q058)"
+  },
+  {
+    "query_id": "Q059",
+    "text": "What is the temperature excursion protocol for seafood? (Ref: Q059)"
+  },
+  {
+    "query_id": "Q060",
+    "text": "How do ethylene scrubbers affect banana ripening? (Ref: Q060)"
+  },
+  {
+    "query_id": "Q061",
+    "text": "How does V2I communication reduce fuel consumption? (Ref: Q061)"
+  },
+  {
+    "query_id": "Q062",
+    "text": "What happens when an autonomous vehicle departs from its corridor? (Ref: Q062)"
+  },
+  {
+    "query_id": "Q063",
+    "text": "At what battery charge level should electric vans schedule charging? (Ref: Q063)"
+  },
+  {
+    "query_id": "Q064",
+    "text": "How fast can DC fast chargers replenish battery capacity? (Ref: Q064)"
+  },
+  {
+    "query_id": "Q065",
+    "text": "What is the positioning accuracy of ASRS cranes? (Ref: Q065)"
+  },
+  {
+    "query_id": "Q066",
+    "text": "What triggers the automated quarantine workflow for RFID? (Ref: Q066)"
+  },
+  {
+    "query_id": "Q067",
+    "text": "When should maintenance be scheduled based on vibration analysis? (Ref: Q067)"
+  },
+  {
+    "query_id": "Q068",
+    "text": "What does forklift diagnostic code E102 indicate? (Ref: Q068)"
+  },
+  {
+    "query_id": "Q069",
+    "text": "What is the temperature excursion protocol for seafood? (Ref: Q069)"
+  },
+  {
+    "query_id": "Q070",
+    "text": "How do ethylene scrubbers affect banana ripening? (Ref: Q070)"
+  },
+  {
+    "query_id": "Q071",
+    "text": "How does V2I communication reduce fuel consumption? (Ref: Q071)"
+  },
+  {
+    "query_id": "Q072",
+    "text": "What happens when an autonomous vehicle departs from its corridor? (Ref: Q072)"
+  },
+  {
+    "query_id": "Q073",
+    "text": "At what battery charge level should electric vans schedule charging? (Ref: Q073)"
+  },
+  {
+    "query_id": "Q074",
+    "text": "How fast can DC fast chargers replenish battery capacity? (Ref: Q074)"
+  },
+  {
+    "query_id": "Q075",
+    "text": "What is the positioning accuracy of ASRS cranes? (Ref: Q075)"
+  },
+  {
+    "query_id": "Q076",
+    "text": "What triggers the automated quarantine workflow for RFID? (Ref: Q076)"
+  },
+  {
+    "query_id": "Q077",
+    "text": "When should maintenance be scheduled based on vibration analysis? (Ref: Q077)"
+  },
+  {
+    "query_id": "Q078",
+    "text": "What does forklift diagnostic code E102 indicate? (Ref: Q078)"
+  },
+  {
+    "query_id": "Q079",
+    "text": "What is the temperature excursion protocol for seafood? (Ref: Q079)"
+  },
+  {
+    "query_id": "Q080",
+    "text": "How do ethylene scrubbers affect banana ripening? (Ref: Q080)"
+  }
+]

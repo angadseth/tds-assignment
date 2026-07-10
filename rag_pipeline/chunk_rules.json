@@ -1,0 +1,7 @@
+{
+  "strategy": "sentence",
+  "chunk_size": 3,
+  "overlap": 1,
+  "rrf_k": 60,
+  "top_k": 5
+}
