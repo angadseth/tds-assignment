@@ -24,6 +24,9 @@ Implemented an offline evaluation harness computing four metrics per trace:
 ```
 ├── q1_retrieval_pipeline.js    # Q1: Hybrid retrieval pipeline (Node.js)
 ├── q2_evaluation_harness.js    # Q2: RAGAS evaluation metrics (Node.js)
+├── docs/
+│   ├── q1_guide.md             # Step-by-step guide for Q1
+│   └── q2_guide.md             # Step-by-step guide for Q2
 ├── rag_pipeline/               # Q1 dataset (student-specific)
 │   ├── documents.jsonl
 │   ├── chunk_rules.json
@@ -48,6 +51,12 @@ node q2_evaluation_harness.js
 ```
 
 Requires Node.js 14+ (for stable sort guarantee and modern JS features).
+
+## Guides
+
+Detailed walkthroughs of the approach, formulas, and common pitfalls:
+- [Q1 Guide — Chunking & Hybrid Retrieval Pipeline](docs/q1_guide.md)
+- [Q2 Guide — RAG Evaluation Harness (RAGAS-style Metrics)](docs/q2_guide.md)
 
 ## Technical Notes
 
