@@ -23,6 +23,7 @@ const express = require('express');
 const crypto = require('crypto');
 const path = require('path');
 const { setupA2ARoutes } = require('./a2a_server');
+const { handleIncident, handleReceipt, getIncident } = require('./incident_agent');
 
 const app = express();
 // Parse application/a2a+json as JSON
@@ -405,6 +406,13 @@ app.post('/mcp', (req, res) => {
 });
 
 // =====================================================
+// Q11: Observable Incident Agent
+// =====================================================
+app.post('/v2/incidents', handleIncident);
+app.post('/v2/incidents/:runId/receipts', handleReceipt);
+app.get('/v2/incidents/:runId', getIncident);
+
+// =====================================================
 // Health check
 // =====================================================
 app.get('/', (req, res) => {
@@ -420,7 +428,10 @@ app.get('/', (req, res) => {
             q10_a2a_message: 'POST /a2a/message:send',
             q10_a2a_task: 'GET /a2a/tasks/:id',
             q10_a2a_tasks: 'GET /a2a/tasks',
-            q10_a2a_cancel: 'POST /a2a/tasks/:id:cancel'
+            q10_a2a_cancel: 'POST /a2a/tasks/:id:cancel',
+            q11_incident_post: 'POST /v2/incidents',
+            q11_incident_receipts: 'POST /v2/incidents/:runId/receipts',
+            q11_incident_get: 'GET /v2/incidents/:runId'
         }
     });
 });
@@ -428,7 +439,7 @@ app.get('/', (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`GA5 Combined Server running on port ${PORT}`);
-    console.log(`Endpoints: /charge, /check, /scan, /budget-check, /mcp`);
+    console.log(`Endpoints: /charge, /check, /scan, /budget-check, /mcp, /v2/incidents`);
 });
 
 module.exports = app;
