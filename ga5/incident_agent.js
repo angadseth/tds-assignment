@@ -1,92 +1,73 @@
 /**
  * Q11: Observable Incident Agent
  *
- * Endpoints:
- *   POST /v2/incidents              – Start a run (AI analysis + diagnostic dispatches)
- *   POST /v2/incidents/:runId/receipts – Process grader receipts (outcomes/approvals)
- *   GET  /v2/incidents/:runId       – Return stored state
- *
- * State machine: init → diag_pending → [approval_pending] → effect_pending → completed/failed
+ * Exports:
+ *   handleIncident(req, res) – POST /v2/incidents
+ *   handleReceipt(req, res)  – POST /v2/incidents/:runId/receipts
+ *   getIncident(req, res)    – GET  /v2/incidents/:runId
  */
 
 const crypto = require('crypto');
-const https = require('https');
+const https  = require('https');
 
 // ============================================================
-// Constants
+// Config
 // ============================================================
 const PROFILE = 'ga5-incident-agent/v2';
-const MODEL = 'gemini-2.0-flash';
+const MODEL   = 'gemini-2.0-flash';
 
 // ============================================================
-// In-memory state store
+// In-memory store
 // ============================================================
 const store = new Map();
 
 // ============================================================
-// Utility helpers
+// Helpers
 // ============================================================
 
 function hex(n) { return crypto.randomBytes(n).toString('hex'); }
+function freshTraceId() { let h; do { h = hex(16); } while (/^0+$/.test(h)); return h; }
+function freshSpanId()  { let h; do { h = hex(8);  } while (/^0+$/.test(h)); return h; }
+function uid() { return hex(8); }
+function nanos(ms) { return (BigInt(ms) * 1000000n).toString(); }
 
-function freshTraceId() {
-  let h;
-  do { h = hex(16); } while (h === '0'.repeat(32));
-  return h;
-}
-
-function freshSpanId() {
-  let h;
-  do { h = hex(8); } while (h === '0'.repeat(16));
-  return h;
-}
-
-function uid() { return hex(8); } // 16 hex chars (≥8 required)
-
-function ns(ms) { return (BigInt(ms) * 1000000n).toString(); }
-
-/** Parse a W3C traceparent header; returns null if invalid. */
 function parseTraceparent(h) {
   if (!h || typeof h !== 'string') return null;
   const m = h.match(/^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/);
-  if (!m || m[1] === '0'.repeat(32) || m[2] === '0'.repeat(16)) return null;
-  return { traceId: m[1], parentSpanId: m[2], flags: m[3] };
+  if (!m || /^0+$/.test(m[1]) || /^0+$/.test(m[2])) return null;
+  return { traceId: m[1], parentId: m[2], flags: m[3] };
 }
 
-/** SHA-256 of recursively key-sorted compact JSON (for argumentsDigest). */
 function sortedDigest(obj) {
   function sk(o) {
     if (o === null || o === undefined) return o;
     if (typeof o !== 'object') return o;
     if (Array.isArray(o)) return o.map(sk);
     const s = {};
-    for (const k of Object.keys(o).sort()) s[k] = sk(o[k]);
+    Object.keys(o).sort().forEach(k => { s[k] = sk(o[k]); });
     return s;
   }
   return crypto.createHash('sha256')
-    .update(JSON.stringify(sk(obj || {})))
+    .update(JSON.stringify(sk(obj != null ? obj : {})))
     .digest('hex');
 }
 
-/** Generic deterministic hash of a value for conflict detection. */
-function djson(o) {
+function jhash(o) {
   return crypto.createHash('sha256').update(JSON.stringify(o)).digest('hex');
 }
 
-/** Build an OTLP string attribute. */
 function sa(k, v) { return { key: k, value: { stringValue: String(v) } }; }
-/** Build an OTLP int attribute. */
-function ia(k, v) { return { key: k, value: { intValue: String(v) } }; }
+function ia(k, v) { return { key: k, value: { intValue: String(Math.floor(Number(v))) } }; }
 
 // ============================================================
 // Gemini API
 // ============================================================
 
-async function callGemini(prompt) {
+function callGemini(prompt) {
   const key = process.env.GEMINI_API_KEY;
-  if (!key) throw new Error('GEMINI_API_KEY is not set');
+  if (!key) return Promise.reject(new Error('GEMINI_API_KEY not set'));
 
-  const body = JSON.stringify({
+  const payload = JSON.stringify({
     contents: [{ role: 'user', parts: [{ text: prompt }] }],
     generationConfig: { responseMimeType: 'application/json', temperature: 0 }
   });
@@ -98,310 +79,218 @@ async function callGemini(prompt) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(body)
+        'Content-Length': Buffer.byteLength(payload)
       }
     }, res => {
       let d = '';
-      res.on('data', c => d += c);
+      res.on('data', c => { d += c; });
       res.on('end', () => {
         try {
           const j = JSON.parse(d);
-          if (!j.candidates || !j.candidates[0] || !j.candidates[0].content) {
-            return reject(new Error('Bad Gemini response: ' + d.substring(0, 500)));
-          }
-          const text = j.candidates[0].content.parts[0].text;
-          resolve(JSON.parse(text));
-        } catch (e) { reject(new Error('Parse error: ' + e.message)); }
+          const txt = j?.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (!txt) return reject(new Error('empty gemini response'));
+          resolve(JSON.parse(txt));
+        } catch (e) { reject(e); }
       });
     });
     req.on('error', reject);
-    req.setTimeout(14000, () => { req.destroy(); reject(new Error('Gemini timeout')); });
-    req.write(body);
+    req.setTimeout(14000, () => { req.destroy(); reject(new Error('timeout')); });
+    req.write(payload);
     req.end();
   });
 }
 
 // ============================================================
-// AI analysis: build diagnosis + tool plan
+// AI Analysis
 // ============================================================
 
-async function analyzeIncident(incident, catalog, policy) {
-  // Extract evidence lines from transcript
+async function analyze(incident, catalog, policy) {
   const lines = incident.transcript.split('\n');
-  const evLines = [];
-  const evIds = [];
+  const evLines = [], evIds = [];
   for (const l of lines) {
     const m = l.trim().match(/^\[([^\]]+)\]/);
-    if (m) {
-      evIds.push(m[1]);
-      evLines.push(l.trim());
-    }
+    if (m) { evIds.push(m[1]); evLines.push(l.trim()); }
   }
 
-  // Separate diagnostic vs. effect tools
   const diagTools = catalog.filter(t => !policy.effectTools.includes(t.name));
-  const effTools = catalog.filter(t => policy.effectTools.includes(t.name));
+  const effTools  = catalog.filter(t => policy.effectTools.includes(t.name));
 
-  const prompt = `You are an incident response AI. Analyze the evidence and produce a JSON response.
+  const prompt = `You are an incident-response AI. Analyze the evidence and produce a JSON decision.
 
 INCIDENT:
-- ID: ${incident.incidentId}
-- Title: ${incident.title}
-- Service: ${incident.service}
-- Severity: ${incident.severity}
+- incidentId: ${incident.incidentId}
+- title: ${incident.title}
+- service: ${incident.service}
+- severity: ${incident.severity}
 
-EVIDENCE LINES (each starts with an ID in brackets):
+EVIDENCE (lines starting with [id]):
 ${evLines.join('\n')}
 
-ALL EVIDENCE IDs: ${JSON.stringify(evIds)}
+Available evidence IDs: ${JSON.stringify(evIds)}
 
-ALLOWED ROOT CAUSES (choose EXACTLY ONE):
+ALLOWED ROOT CAUSES (choose EXACTLY ONE string from this list):
 ${JSON.stringify(incident.allowedRootCauses)}
 
-DIAGNOSTIC TOOLS (choose 1 to ${policy.maximumDiagnostics}, these confirm root cause):
+DIAGNOSTIC TOOLS (choose 1 to ${policy.maximumDiagnostics}):
 ${JSON.stringify(diagTools, null, 2)}
 
-EFFECT TOOLS (choose EXACTLY ONE, this fixes the problem):
+EFFECT TOOLS (choose exactly 1):
 ${JSON.stringify(effTools, null, 2)}
 
 RULES:
-1. Pick ONE rootCause from the allowed list (exact string match).
-2. Cite 2-4 UNIQUE evidence IDs from the list above that justify the root cause.
-3. Pick 1-${policy.maximumDiagnostics} diagnostic tools. For each provide toolName (exact), arguments (matching inputSchema with real incident-specific values), and evidenceRef (1+ evidence IDs from your cited evidence).
-4. Pick 1 effect tool. Provide toolName (exact) and effectArguments (matching inputSchema with real values).
-5. Use service names, metric names, deployment IDs, timestamps, and other concrete values from the evidence lines.
-6. Send independent diagnostics together (they can run in parallel).
+1. rootCause: exact string from allowedRootCauses.
+2. evidence: 2-4 unique IDs from the available evidence IDs that justify rootCause.
+3. diagnostics: 1-${policy.maximumDiagnostics} tools. Each has toolName (exact catalog name), arguments (object matching inputSchema with real incident-specific values), evidenceRef (1+ IDs from your cited evidence).
+4. chosenEffect: exact name from effect tools.
+5. effectArguments: object matching the effect tool inputSchema with real values.
+6. Use concrete values from the incident: service names, timestamps, metric names, deployment IDs, versions.
+7. Only include diagnostics genuinely needed to confirm this specific root cause.
 
-Return ONLY this JSON:
-{"rootCause":"exactly from allowed list","evidence":["id1","id2"],"diagnostics":[{"toolName":"exact_name","arguments":{},"evidenceRef":["id1"]}],"chosenEffect":"exact_name","effectArguments":{}}`;
+Return ONLY valid JSON, no markdown:
+{"rootCause":"...","evidence":["..."],"diagnostics":[{"toolName":"...","arguments":{...},"evidenceRef":["..."]}],"chosenEffect":"...","effectArguments":{...}}`;
 
-  let result;
+  let plan;
   try {
-    result = await callGemini(prompt);
+    plan = await callGemini(prompt);
   } catch (e) {
-    console.error('Gemini call failed, using fallback:', e.message);
-    // Minimal fallback
-    result = {
+    console.error('Gemini error, fallback:', e.message);
+    plan = {
       rootCause: incident.allowedRootCauses[0],
       evidence: evIds.slice(0, 3),
       diagnostics: diagTools.length > 0
-        ? [{ toolName: diagTools[0].name, arguments: {}, evidenceRef: [evIds[0]] }]
+        ? [{ toolName: diagTools[0].name, arguments: {}, evidenceRef: [evIds[0] || 'ev_1'] }]
         : [],
       chosenEffect: policy.effectTools[0],
       effectArguments: {}
     };
   }
 
-  // ---- Validate & fix AI response ----
+  // Validate/fix
+  if (!incident.allowedRootCauses.includes(plan.rootCause))
+    plan.rootCause = incident.allowedRootCauses[0];
 
-  // rootCause must be in allowed list
-  if (!incident.allowedRootCauses.includes(result.rootCause)) {
-    result.rootCause = incident.allowedRootCauses[0];
-  }
+  if (!Array.isArray(plan.evidence)) plan.evidence = [];
+  plan.evidence = [...new Set(plan.evidence)].filter(e => evIds.includes(e));
+  if (plan.evidence.length < 2) plan.evidence = evIds.slice(0, Math.min(3, evIds.length));
+  plan.evidence = [...new Set(plan.evidence)].slice(0, 4);
 
-  // evidence: 2-4 unique IDs
-  if (!Array.isArray(result.evidence)) result.evidence = [];
-  result.evidence = [...new Set(result.evidence)].filter(e => evIds.includes(e));
-  if (result.evidence.length < 2) {
-    result.evidence = evIds.slice(0, Math.min(3, evIds.length));
-  }
-  result.evidence = result.evidence.slice(0, 4);
-
-  // diagnostics: 1-max
-  if (!Array.isArray(result.diagnostics) || result.diagnostics.length === 0) {
-    result.diagnostics = diagTools.length > 0
-      ? [{ toolName: diagTools[0].name, arguments: {}, evidenceRef: [result.evidence[0]] }]
+  if (!Array.isArray(plan.diagnostics) || plan.diagnostics.length === 0) {
+    plan.diagnostics = diagTools.length > 0
+      ? [{ toolName: diagTools[0].name, arguments: {}, evidenceRef: [plan.evidence[0]] }]
       : [];
   }
-  result.diagnostics = result.diagnostics.slice(0, policy.maximumDiagnostics);
+  plan.diagnostics = plan.diagnostics.slice(0, policy.maximumDiagnostics);
 
-  // Fix each diagnostic
-  const catalogNames = new Set(catalog.map(t => t.name));
-  for (const d of result.diagnostics) {
-    if (!catalogNames.has(d.toolName) && diagTools.length > 0) {
-      d.toolName = diagTools[0].name;
-    }
-    if (!d.arguments) d.arguments = {};
-    if (!Array.isArray(d.evidenceRef) || d.evidenceRef.length === 0) {
-      d.evidenceRef = [result.evidence[0]];
-    }
-    // Filter to only cited diagnosis evidence
-    d.evidenceRef = [...new Set(d.evidenceRef.filter(e => result.evidence.includes(e)))];
-    if (d.evidenceRef.length === 0) d.evidenceRef = [result.evidence[0]];
+  const diagSet = new Set(diagTools.map(t => t.name));
+  for (const d of plan.diagnostics) {
+    if (!diagSet.has(d.toolName)) d.toolName = diagTools[0]?.name || catalog[0]?.name;
+    if (!d.arguments || typeof d.arguments !== 'object') d.arguments = {};
+    if (!Array.isArray(d.evidenceRef) || d.evidenceRef.length === 0)
+      d.evidenceRef = [plan.evidence[0]];
+    d.evidenceRef = [...new Set(d.evidenceRef.filter(e => plan.evidence.includes(e)))];
+    if (d.evidenceRef.length === 0) d.evidenceRef = [plan.evidence[0]];
   }
 
-  // chosenEffect must be in effectTools
-  if (!policy.effectTools.includes(result.chosenEffect)) {
-    result.chosenEffect = policy.effectTools[0];
-  }
-  if (!result.effectArguments) result.effectArguments = {};
+  if (!policy.effectTools.includes(plan.chosenEffect))
+    plan.chosenEffect = policy.effectTools[0];
+  if (!plan.effectArguments || typeof plan.effectArguments !== 'object')
+    plan.effectArguments = {};
 
-  return result;
+  return plan;
 }
 
 // ============================================================
-// POST /v2/incidents
+// POST /v2/incidents handler
 // ============================================================
 
 async function handleIncident(req, res) {
   try {
     const body = req.body;
 
-    // --- Validation ---
-    if (!body || body.profile !== PROFILE) {
+    if (!body || body.profile !== PROFILE)
       return res.status(400).json({ error: 'Unsupported profile' });
-    }
-    if (!body.runId || !body.incident || !body.toolCatalog || !body.policy) {
+    if (!body.runId || !body.incident || !body.toolCatalog || !body.policy)
       return res.status(422).json({ error: 'Missing required fields' });
-    }
 
     const runId = body.runId;
-
-    // Content hash (excludes sensitive and runId)
-    const ch = djson({
-      profile: body.profile,
-      agentName: body.agentName,
-      publicMarker: body.publicMarker,
-      incident: body.incident,
-      toolCatalog: body.toolCatalog,
-      policy: body.policy
+    const ch = jhash({
+      profile: body.profile, agentName: body.agentName,
+      publicMarker: body.publicMarker, incident: body.incident,
+      toolCatalog: body.toolCatalog, policy: body.policy
     });
 
-    // --- Replay / conflict ---
+    // Replay/conflict
     if (store.has(runId)) {
-      const existing = store.get(runId);
-      if (existing.contentHash !== ch) {
-        return res.status(409).json({ error: 'Content conflict for runId' });
-      }
-      // Replay: return stored response without model call
-      return res.json(existing.lastResponse);
+      const ex = store.get(runId);
+      if (ex.ch !== ch) return res.status(409).json({ error: 'Content conflict' });
+      return res.json(ex.lastResp);
     }
 
-    // --- Parse incoming trace context ---
-    const tp = parseTraceparent(req.headers['traceparent']);
-    const tid = tp ? tp.traceId : freshTraceId();
-    const incomingParentSid = tp ? tp.parentSpanId : null;
-    const flags = tp ? tp.flags : '01';
-    const tstate = tp ? (req.headers['tracestate'] || undefined) : undefined;
+    // Trace context
+    const tp    = parseTraceparent(req.headers['traceparent']);
+    const tid   = tp ? tp.traceId  : freshTraceId();
+    const pSid  = tp ? tp.parentId : null;
+    const flags = tp ? tp.flags    : '01';
+    const tst   = tp ? (req.headers['tracestate'] || undefined) : undefined;
 
-    // --- Call AI model ---
-    const plan = await analyzeIncident(body.incident, body.toolCatalog, body.policy);
+    // AI call
+    const plan = await analyze(body.incident, body.toolCatalog, body.policy);
 
-    // --- Build run state ---
+    // Create run
     const run = {
-      runId,
-      contentHash: ch,
-      publicMarker: body.publicMarker,
-      agentName: body.agentName || 'incident-response',
-
-      // Trace context
-      traceId: tid,
-      incomingParentSid,
-      flags,
-      tstate,
-
-      // OTLP span IDs (stable across replays)
-      serverSid: freshSpanId(),
-      agentSid: freshSpanId(),
-      chatSid: freshSpanId(),
-      joinSid: null,
-
-      // Diagnosis
-      diagnosis: { rootCause: plan.rootCause, evidence: plan.evidence },
-      chosenEffect: plan.chosenEffect,
+      runId, ch,
+      marker: body.publicMarker,
+      agent:  body.agentName || 'incident-response',
+      tid, pSid, flags, tst,
+      sSid: freshSpanId(), aSid: freshSpanId(), cSid: freshSpanId(),
+      diag: { rootCause: plan.rootCause, evidence: plan.evidence },
+      effect: plan.chosenEffect,
       effectArgs: plan.effectArguments,
-
-      // State machine
-      phase: 'diag_pending',
-
-      // Actions (logical tool calls)
-      actions: [],
-      actionLog: [],
-      receiptLog: [],
-      receiptHashes: {},
-
-      // Approval
-      approval: null,
-      approvalReceipt: null,
-
-      // Suppressed effects
-      suppressed: [],
-
-      // Timing
-      startMs: Date.now(),
-
-      // Policy
-      policy: body.policy,
-
-      // Last response (for replay)
-      lastResponse: null
+      phase: 'diag',
+      actions: [], aLog: [], rLog: [],
+      rHashes: new Map(),
+      appr: null, apprRcpt: null,
+      joinSid: null, suppressed: [],
+      t0: Date.now(), lastResp: null,
+      policy: body.policy
     };
 
-    // --- Build diagnostic dispatches ---
+    // Diagnostic dispatches
     const dispatches = [];
     for (const d of plan.diagnostics) {
-      const actionId = uid();
-      const callId = uid();
-      const clientSid = freshSpanId();
-      const etSid = freshSpanId();
-
-      const dispatch = {
-        actionId,
-        callId,
-        phase: 'diagnostic',
-        toolName: d.toolName,
-        arguments: d.arguments,
-        evidence: d.evidenceRef,
+      const aid = uid(), cid = uid();
+      const csid = freshSpanId(), etsid = freshSpanId();
+      const disp = {
+        actionId: aid, callId: cid,
+        phase: 'diagnostic', toolName: d.toolName,
+        arguments: d.arguments, evidence: d.evidenceRef,
         attempt: 1,
-        traceparent: `00-${tid}-${clientSid}-${flags}`
+        traceparent: `00-${tid}-${csid}-${flags}`
       };
-      if (tstate) dispatch.tracestate = tstate;
-
-      dispatches.push(dispatch);
-      run.actionLog.push({ ...dispatch });
-
+      if (tst) disp.tracestate = tst;
+      dispatches.push(disp);
+      run.aLog.push({ ...disp });
       run.actions.push({
-        actionId,
-        callId,
-        toolName: d.toolName,
-        arguments: d.arguments,
-        phase: 'diagnostic',
-        evidence: d.evidenceRef,
-        etSid,
-        attempts: [{
-          attempt: 1,
-          cSid: clientSid,
-          dispatch: { ...dispatch },
-          done: false,
-          receipt: null
-        }]
+        aid, cid, tool: d.toolName, args: d.arguments,
+        ph: 'diagnostic', ev: d.evidenceRef, etSid: etsid,
+        atts: [{ n: 1, cSid: csid, disp: { ...disp }, done: false, rcpt: null }]
       });
     }
 
-    // Join span if >1 parallel diagnostics
-    if (dispatches.length > 1) {
-      run.joinSid = freshSpanId();
-    }
+    if (dispatches.length > 1) run.joinSid = freshSpanId();
 
-    const response = {
-      runId,
-      status: 'waiting',
-      diagnosis: run.diagnosis,
-      dispatches,
-      approvals: []
-    };
-
-    run.lastResponse = response;
+    const resp = { runId, status: 'waiting', diagnosis: run.diag, dispatches, approvals: [] };
+    run.lastResp = resp;
     store.set(runId, run);
-    return res.json(response);
+    return res.json(resp);
   } catch (err) {
-    console.error('handleIncident error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
+    console.error('POST /v2/incidents error:', err);
+    return res.status(500).json({ error: 'Internal error' });
   }
 }
 
 // ============================================================
-// POST /v2/incidents/:runId/receipts
+// POST /v2/incidents/:runId/receipts handler
 // ============================================================
 
 function handleReceipt(req, res) {
@@ -409,312 +298,192 @@ function handleReceipt(req, res) {
     const { runId } = req.params;
     const body = req.body;
 
-    if (!store.has(runId)) {
+    if (!store.has(runId))
       return res.status(404).json({ error: 'Run not found' });
-    }
 
     const run = store.get(runId);
     const rid = body.receiptId;
-    if (!rid) {
+    if (!rid)
       return res.status(422).json({ error: 'Missing receiptId' });
+
+    const rh = jhash(body);
+
+    // Receipt replay/conflict
+    if (run.rHashes.has(rid)) {
+      if (run.rHashes.get(rid) !== rh) return res.status(409).json({ error: 'Receipt conflict' });
+      return res.json(run.lastResp);
     }
 
-    const rh = djson(body);
-
-    // Receipt replay / conflict
-    if (run.receiptHashes[rid] !== undefined) {
-      if (run.receiptHashes[rid] !== rh) {
-        return res.status(409).json({ error: 'Receipt content conflict' });
-      }
-      // Replay: return stored response
-      return res.json(run.lastResponse);
-    }
-
-    // Reject if run is already terminal
-    if (run.phase === 'completed' || run.phase === 'failed') {
+    if (run.phase === 'done' || run.phase === 'fail')
       return res.status(422).json({ error: 'Run already terminal' });
-    }
 
-    // --- Process outcomes ---
+    // Process outcomes
     if (Array.isArray(body.outcomes)) {
       for (const o of body.outcomes) {
-        const action = run.actions.find(a => a.actionId === o.actionId);
+        const action = run.actions.find(a => a.aid === o.actionId);
         if (!action) continue;
-
-        const att = action.attempts.find(a =>
-          a.attempt === o.attempt && !a.done
-        );
+        const att = action.atts.find(a => a.n === o.attempt && !a.done);
         if (!att) continue;
 
         att.done = true;
-        att.receipt = {
-          receiptId: rid,
-          status: o.status,
-          resultClass: o.resultClass,
-          nonce: o.nonce,
-          errorType: o.errorType
-        };
+        att.rcpt = { rid, status: o.status, cls: o.resultClass, nonce: o.nonce, err: o.errorType };
 
-        // Add to receipt log
-        const logEntry = {
-          receiptId: rid,
-          actionId: o.actionId,
-          callId: o.callId,
-          attempt: o.attempt,
-          status: o.status,
-          resultClass: o.resultClass,
-          nonce: o.nonce
-        };
-        run.receiptLog.push(logEntry);
+        run.rLog.push({
+          receiptId: rid, actionId: o.actionId, callId: o.callId,
+          attempt: o.attempt, status: o.status,
+          resultClass: o.resultClass, nonce: o.nonce
+        });
 
-        // 503 → retry once
-        if (o.status === 503 && action.attempts.length < 2) {
-          const newCsid = freshSpanId();
-          const retryNum = o.attempt + 1;
-          const retryDisp = {
-            actionId: action.actionId,
-            callId: action.callId,
-            phase: action.phase,
-            toolName: action.toolName,
-            arguments: action.arguments,
-            evidence: action.evidence,
-            attempt: retryNum,
-            traceparent: `00-${run.traceId}-${newCsid}-${run.flags}`
+        // 503 retry (once)
+        if (o.status === 503 && action.atts.length < 2) {
+          const newSid = freshSpanId();
+          const retryN = o.attempt + 1;
+          const rd = {
+            actionId: action.aid, callId: action.cid,
+            phase: action.ph, toolName: action.tool,
+            arguments: action.args, evidence: action.ev,
+            attempt: retryN,
+            traceparent: `00-${run.tid}-${newSid}-${run.flags}`
           };
-          if (run.tstate) retryDisp.tracestate = run.tstate;
-
-          action.attempts.push({
-            attempt: retryNum,
-            cSid: newCsid,
-            dispatch: { ...retryDisp },
-            done: false,
-            receipt: null
-          });
-          run.actionLog.push({ ...retryDisp });
+          if (run.tst) rd.tracestate = run.tst;
+          action.atts.push({ n: retryN, cSid: newSid, disp: { ...rd }, done: false, rcpt: null });
+          run.aLog.push({ ...rd });
         }
       }
     }
 
-    // --- Process approvals ---
+    // Process approvals
     if (Array.isArray(body.approvals)) {
       for (const a of body.approvals) {
-        if (run.approval && run.approval.approvalId === a.approvalId) {
-          run.approvalReceipt = {
-            receiptId: rid,
-            approvalId: a.approvalId,
-            decision: a.decision,
-            nonce: a.nonce
-          };
-          run.receiptLog.push({
-            receiptId: rid,
-            approvalId: a.approvalId,
-            decision: a.decision,
-            nonce: a.nonce
-          });
+        if (run.appr && run.appr.apprId === a.approvalId) {
+          run.apprRcpt = { rid, apprId: a.approvalId, decision: a.decision, nonce: a.nonce };
+          run.rLog.push({ receiptId: rid, approvalId: a.approvalId, decision: a.decision, nonce: a.nonce });
         }
       }
     }
 
-    // Store receipt hash
-    run.receiptHashes[rid] = rh;
+    run.rHashes.set(rid, rh);
 
-    // Determine next state
-    const resp = resolveNextState(run);
-    run.lastResponse = resp;
+    const resp = advance(run);
+    run.lastResp = resp;
     return res.json(resp);
   } catch (err) {
-    console.error('handleReceipt error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
+    console.error('POST receipts error:', err);
+    return res.status(500).json({ error: 'Internal error' });
   }
 }
 
 // ============================================================
-// State resolution
+// State machine
 // ============================================================
 
-function resolveNextState(run) {
-  // 1. Collect pending dispatches (not yet received outcome)
+function advance(run) {
+  // Pending dispatches?
   const pending = [];
   for (const a of run.actions) {
-    const last = a.attempts[a.attempts.length - 1];
-    if (!last.done) pending.push(last.dispatch);
+    const last = a.atts[a.atts.length - 1];
+    if (!last.done) pending.push(last.disp);
   }
+  if (pending.length > 0)
+    return { runId: run.runId, status: 'waiting', diagnosis: run.diag, dispatches: pending, approvals: [] };
 
-  // If retries or dispatches are pending, return them (no approval in a retry response)
-  if (pending.length > 0) {
-    return {
-      runId: run.runId,
-      status: 'waiting',
-      diagnosis: run.diagnosis,
-      dispatches: pending,
-      approvals: []
-    };
-  }
+  // Diagnostics complete?
+  if (run.phase === 'diag') {
+    const diags = run.actions.filter(a => a.ph === 'diagnostic');
+    const allDone = diags.every(a => a.atts[a.atts.length - 1].done);
+    if (!allDone)
+      return { runId: run.runId, status: 'waiting', diagnosis: run.diag, dispatches: [], approvals: [] };
 
-  // 2. All current attempts resolved
-  if (run.phase === 'diag_pending') {
-    const diags = run.actions.filter(a => a.phase === 'diagnostic');
-    const allDone = diags.every(a => {
-      const last = a.attempts[a.attempts.length - 1];
-      return last.done;
+    const timedOut = diags.some(a => {
+      const r = a.atts[a.atts.length - 1].rcpt;
+      return r && (r.status === 0 || r.err === 'timeout');
     });
+    if (timedOut) {
+      run.suppressed = [run.effect];
+      run.phase = 'fail';
+      return final(run);
+    }
 
-    if (allDone) {
-      // Check for timeout or total failure
-      const anyTimeout = diags.some(a => {
-        const last = a.attempts[a.attempts.length - 1];
-        return last.receipt &&
-          (last.receipt.status === 0 || last.receipt.errorType === 'timeout');
-      });
+    const needAppr = run.policy.approvalRequiredFor?.includes(run.effect);
+    if (needAppr) {
+      const aid = uid(), apid = uid();
+      run.appr = { apprId: apid, actionId: aid, tool: run.effect,
+                    digest: sortedDigest(run.effectArgs), gSid: freshSpanId() };
+      run.phase = 'approve';
+      return { runId: run.runId, status: 'waiting', diagnosis: run.diag,
+               dispatches: [],
+               approvals: [{ approvalId: apid, actionId: aid,
+                              toolName: run.effect, argumentsDigest: run.appr.digest }] };
+    }
+    return emitEffect(run, null, null);
+  }
 
-      if (anyTimeout) {
-        run.suppressed = [run.chosenEffect];
-        run.phase = 'failed';
-        return buildFinalResponse(run);
-      }
+  // Approval received?
+  if (run.phase === 'approve' && run.apprRcpt)
+    return emitEffect(run, run.appr.apprId, run.apprRcpt.nonce);
 
-      // All diagnostics succeeded → proceed to effect
-      const needsApproval = run.policy.approvalRequiredFor &&
-        run.policy.approvalRequiredFor.includes(run.chosenEffect);
-
-      if (needsApproval) {
-        // Reserve action ID for the effect
-        const actionId = uid();
-        const approvalId = uid();
-
-        run.approval = {
-          approvalId,
-          actionId,
-          toolName: run.chosenEffect,
-          argumentsDigest: sortedDigest(run.effectArgs),
-          aSid: freshSpanId()
-        };
-        run.phase = 'approval_pending';
-
-        return {
-          runId: run.runId,
-          status: 'waiting',
-          diagnosis: run.diagnosis,
-          dispatches: [],
-          approvals: [{
-            approvalId,
-            actionId,
-            toolName: run.chosenEffect,
-            argumentsDigest: run.approval.argumentsDigest
-          }]
-        };
-      } else {
-        // No approval needed → dispatch effect directly
-        return emitEffect(run, null, null);
-      }
+  // Effect outcome?
+  if (run.phase === 'eff') {
+    const eff = run.actions.find(a => a.ph === 'effect');
+    if (eff && eff.atts[eff.atts.length - 1].done) {
+      run.phase = 'done';
+      return final(run);
     }
   }
 
-  // 3. Approval received → dispatch effect
-  if (run.phase === 'approval_pending' && run.approvalReceipt) {
-    return emitEffect(run, run.approval.approvalId, run.approvalReceipt.nonce);
+  // Waiting for approval
+  if (run.phase === 'approve' && run.appr && !run.apprRcpt) {
+    return { runId: run.runId, status: 'waiting', diagnosis: run.diag,
+             dispatches: [],
+             approvals: [{ approvalId: run.appr.apprId, actionId: run.appr.actionId,
+                           toolName: run.appr.tool, argumentsDigest: run.appr.digest }] };
   }
-
-  // 4. Effect outcome received → completed
-  if (run.phase === 'effect_pending') {
-    const eff = run.actions.find(a => a.phase === 'effect');
-    if (eff) {
-      const last = eff.attempts[eff.attempts.length - 1];
-      if (last.done) {
-        run.phase = 'completed';
-        return buildFinalResponse(run);
-      }
-    }
-  }
-
-  // Still waiting (edge case)
-  return {
-    runId: run.runId,
-    status: 'waiting',
-    diagnosis: run.diagnosis,
-    dispatches: [],
-    approvals: run.approval && !run.approvalReceipt
-      ? [{
-        approvalId: run.approval.approvalId,
-        actionId: run.approval.actionId,
-        toolName: run.approval.toolName,
-        argumentsDigest: run.approval.argumentsDigest
-      }]
-      : []
-  };
+  return { runId: run.runId, status: 'waiting', diagnosis: run.diag, dispatches: [], approvals: [] };
 }
 
-// ============================================================
-// Emit effect dispatch
-// ============================================================
+function emitEffect(run, apprId, apprNonce) {
+  const aid  = run.appr ? run.appr.actionId : uid();
+  const cid  = uid();
+  const csid = freshSpanId();
+  const etsid = freshSpanId();
 
-function emitEffect(run, approvalId, approvalNonce) {
-  const actionId = run.approval ? run.approval.actionId : uid();
-  const callId = uid();
-  const clientSid = freshSpanId();
-  const etSid = freshSpanId();
-
-  const dispatch = {
-    actionId,
-    callId,
-    phase: 'effect',
-    toolName: run.chosenEffect,
-    arguments: run.effectArgs,
-    evidence: run.diagnosis.evidence,
+  const disp = {
+    actionId: aid, callId: cid,
+    phase: 'effect', toolName: run.effect,
+    arguments: run.effectArgs, evidence: run.diag.evidence,
     attempt: 1,
-    traceparent: `00-${run.traceId}-${clientSid}-${run.flags}`
+    traceparent: `00-${run.tid}-${csid}-${run.flags}`
   };
-  if (run.tstate) dispatch.tracestate = run.tstate;
-  if (approvalId) {
-    dispatch.approvalId = approvalId;
-    dispatch.approvalNonce = approvalNonce;
-  }
+  if (run.tst) disp.tracestate = run.tst;
+  if (apprId) { disp.approvalId = apprId; disp.approvalNonce = apprNonce; }
 
-  run.actionLog.push({ ...dispatch });
+  run.aLog.push({ ...disp });
   run.actions.push({
-    actionId,
-    callId,
-    toolName: run.chosenEffect,
-    arguments: run.effectArgs,
-    phase: 'effect',
-    evidence: run.diagnosis.evidence,
-    etSid,
-    attempts: [{
-      attempt: 1,
-      cSid: clientSid,
-      dispatch: { ...dispatch },
-      done: false,
-      receipt: null
-    }]
+    aid, cid, tool: run.effect, args: run.effectArgs,
+    ph: 'effect', ev: run.diag.evidence, etSid: etsid,
+    atts: [{ n: 1, cSid: csid, disp: { ...disp }, done: false, rcpt: null }]
   });
+  run.phase = 'eff';
 
-  run.phase = 'effect_pending';
-
-  return {
-    runId: run.runId,
-    status: 'waiting',
-    diagnosis: run.diagnosis,
-    dispatches: [dispatch],
-    approvals: []
-  };
+  return { runId: run.runId, status: 'waiting', diagnosis: run.diag, dispatches: [disp], approvals: [] };
 }
 
 // ============================================================
-// Final response builder
+// Final response
 // ============================================================
 
-function buildFinalResponse(run) {
+function final(run) {
   return {
-    runId: run.runId,
-    status: run.suppressed.length > 0 ? 'failed' : 'completed',
-    diagnosis: run.diagnosis,
-    chosenEffect: run.chosenEffect,
-    suppressed: run.suppressed,
-    actionLog: run.actionLog,
-    receiptLog: run.receiptLog,
-    otlp: buildOTLP(run),
-    dispatches: [],
-    approvals: []
+    runId:       run.runId,
+    status:      run.phase === 'fail' ? 'failed' : 'completed',
+    diagnosis:   run.diag,
+    chosenEffect: run.effect,
+    suppressed:  run.suppressed,
+    actionLog:   run.aLog,
+    receiptLog:  run.rLog,
+    otlp:        buildOTLP(run),
+    dispatches:  [],
+    approvals:   []
   };
 }
 
@@ -724,194 +493,128 @@ function buildFinalResponse(run) {
 
 function buildOTLP(run) {
   const spans = [];
-  const T = run.startMs;
+  const T = run.t0;
   let off = 0;
+  const ca = [sa('ga5.run.id', run.runId), sa('ga5.public.marker', run.marker)];
 
-  // Common attributes on every span
-  const ca = [
-    sa('ga5.run.id', run.runId),
-    sa('ga5.public.marker', run.publicMarker)
-  ];
-
-  // ---- 1. SERVER span ----
-  const serverSpan = {
-    traceId: run.traceId,
-    spanId: run.serverSid,
-    name: 'POST /v2/incidents',
-    kind: 2, // SERVER
-    startTimeUnixNano: ns(T),
-    endTimeUnixNano: ns(T + 9000),
-    attributes: [...ca],
-    status: {}
+  // SERVER
+  const srv = {
+    traceId: run.tid, spanId: run.sSid,
+    name: 'POST /v2/incidents', kind: 2,
+    startTimeUnixNano: nanos(T), endTimeUnixNano: nanos(T + 10000),
+    attributes: [...ca], status: {}
   };
-  if (run.incomingParentSid) {
-    serverSpan.parentSpanId = run.incomingParentSid;
-  }
-  spans.push(serverSpan);
+  if (run.pSid) srv.parentSpanId = run.pSid;
+  spans.push(srv);
 
-  // ---- 2. INTERNAL invoke_agent ----
+  // invoke_agent
   spans.push({
-    traceId: run.traceId,
-    spanId: run.agentSid,
-    parentSpanId: run.serverSid,
-    name: `invoke_agent ${run.agentName}`,
-    kind: 1, // INTERNAL
-    startTimeUnixNano: ns(T + 1),
-    endTimeUnixNano: ns(T + 8999),
-    attributes: [...ca],
-    status: {}
+    traceId: run.tid, spanId: run.aSid, parentSpanId: run.sSid,
+    name: `invoke_agent ${run.agent}`, kind: 1,
+    startTimeUnixNano: nanos(T + 1), endTimeUnixNano: nanos(T + 9999),
+    attributes: [...ca], status: {}
   });
 
-  // ---- 3. CLIENT chat incident-plan (exactly one) ----
+  // chat incident-plan (exactly one)
   spans.push({
-    traceId: run.traceId,
-    spanId: run.chatSid,
-    parentSpanId: run.agentSid,
-    name: 'chat incident-plan',
-    kind: 3, // CLIENT
-    startTimeUnixNano: ns(T + 10),
-    endTimeUnixNano: ns(T + 2000),
-    attributes: [
-      ...ca,
-      sa('gen_ai.operation.name', 'chat'),
-      sa('gen_ai.request.model', MODEL)
-    ],
+    traceId: run.tid, spanId: run.cSid, parentSpanId: run.aSid,
+    name: 'chat incident-plan', kind: 3,
+    startTimeUnixNano: nanos(T + 5), endTimeUnixNano: nanos(T + 2000),
+    attributes: [...ca, sa('gen_ai.operation.name', 'chat'), sa('gen_ai.request.model', MODEL)],
     status: {}
   });
 
   off = 2001;
 
-  // ---- 4. execute_tool + CLIENT spans (per logical action) ----
+  // Per-action spans
   for (const a of run.actions) {
-    const etStart = T + off;
-    // Calculate end time to enclose all attempts
-    const etEnd = etStart + 200 + (a.attempts.length * 500);
+    const aStart = T + off;
+    const aEnd   = aStart + 200 + a.atts.length * 600;
 
-    // INTERNAL execute_tool <toolName>
+    // INTERNAL execute_tool
     spans.push({
-      traceId: run.traceId,
-      spanId: a.etSid,
-      parentSpanId: run.agentSid,
-      name: `execute_tool ${a.toolName}`,
-      kind: 1,
-      startTimeUnixNano: ns(etStart),
-      endTimeUnixNano: ns(etEnd),
+      traceId: run.tid, spanId: a.etSid, parentSpanId: run.aSid,
+      name: `execute_tool ${a.tool}`, kind: 1,
+      startTimeUnixNano: nanos(aStart), endTimeUnixNano: nanos(aEnd),
       attributes: [
         ...ca,
-        sa('ga5.action.id', a.actionId),
-        sa('gen_ai.tool.name', a.toolName),
-        sa('gen_ai.tool.call.id', a.callId),
-        sa('gen_ai.operation.name', 'execute_tool')
+        sa('ga5.action.id', a.aid), sa('gen_ai.tool.name', a.tool),
+        sa('gen_ai.tool.call.id', a.cid), sa('gen_ai.operation.name', 'execute_tool')
       ],
       status: {}
     });
 
-    // CLIENT POST tool/<toolName> (one per physical attempt)
-    let attOff = 100;
-    for (const att of a.attempts) {
+    // CLIENT per attempt
+    let aOff = 100;
+    for (const att of a.atts) {
       const cAttrs = [
         ...ca,
-        sa('ga5.action.id', a.actionId),
-        ia('ga5.attempt', att.attempt),
-        sa('http.request.method', 'POST'),
-        ia('http.request.resend_count', att.attempt - 1)
+        sa('ga5.action.id', a.aid), ia('ga5.attempt', att.n),
+        sa('http.request.method', 'POST'), ia('http.request.resend_count', att.n - 1)
       ];
+      const cStatus = {};
 
-      const cSpan = {
-        traceId: run.traceId,
-        spanId: att.cSid,
-        parentSpanId: a.etSid,
-        name: `POST tool/${a.toolName}`,
-        kind: 3,
-        startTimeUnixNano: ns(etStart + attOff),
-        endTimeUnixNano: ns(etStart + attOff + 400),
-        attributes: cAttrs,
-        status: {}
-      };
-
-      // Populate receipt info
-      if (att.receipt) {
-        cAttrs.push(sa('ga5.receipt.id', att.receipt.receiptId));
-        cAttrs.push(sa('ga5.receipt.nonce', att.receipt.nonce));
-
-        if (att.receipt.status === 503) {
-          cSpan.status = { code: 2 }; // ERROR
+      if (att.rcpt) {
+        cAttrs.push(sa('ga5.receipt.id', att.rcpt.rid));
+        cAttrs.push(sa('ga5.receipt.nonce', att.rcpt.nonce));
+        if (att.rcpt.status === 503) {
+          cStatus.code = 2;
           cAttrs.push(sa('error.type', '503'));
-        } else if (att.receipt.status === 0 || att.receipt.errorType === 'timeout') {
-          cSpan.status = { code: 2 }; // ERROR
+        } else if (att.rcpt.status === 0 || att.rcpt.err === 'timeout') {
+          cStatus.code = 2;
           cAttrs.push(sa('error.type', 'timeout'));
         }
-        // Success: leave status as UNSET ({}), no error.type
       }
 
-      spans.push(cSpan);
-      attOff += 500;
+      spans.push({
+        traceId: run.tid, spanId: att.cSid, parentSpanId: a.etSid,
+        name: `POST tool/${a.tool}`, kind: 3,
+        startTimeUnixNano: nanos(aStart + aOff), endTimeUnixNano: nanos(aStart + aOff + 500),
+        attributes: cAttrs, status: cStatus
+      });
+      aOff += 600;
     }
-    off += 200 + (a.attempts.length * 500) + 100;
+    off += 200 + a.atts.length * 600 + 100;
   }
 
-  // ---- 5. incident.join (when >1 parallel diagnostic) ----
-  const diags = run.actions.filter(a => a.phase === 'diagnostic');
+  // incident.join
+  const diags = run.actions.filter(a => a.ph === 'diagnostic');
   if (diags.length > 1 && run.joinSid) {
     spans.push({
-      traceId: run.traceId,
-      spanId: run.joinSid,
-      parentSpanId: run.agentSid,
-      name: 'incident.join',
-      kind: 1,
-      startTimeUnixNano: ns(T + off),
-      endTimeUnixNano: ns(T + off + 10),
+      traceId: run.tid, spanId: run.joinSid, parentSpanId: run.aSid,
+      name: 'incident.join', kind: 1,
+      startTimeUnixNano: nanos(T + off), endTimeUnixNano: nanos(T + off + 10),
       attributes: [...ca],
-      links: diags.map(d => ({
-        traceId: run.traceId,
-        spanId: d.etSid
-      })),
+      links: diags.map(d => ({ traceId: run.tid, spanId: d.etSid })),
       status: {}
     });
     off += 20;
   }
 
-  // ---- 6. approval_gate (when approval is required) ----
-  if (run.approval) {
-    const gateAttrs = [
-      ...ca,
-      sa('ga5.approval.id', run.approval.approvalId)
-    ];
-    if (run.approvalReceipt) {
-      gateAttrs.push(sa('ga5.receipt.nonce', run.approvalReceipt.nonce));
-    }
+  // approval_gate
+  if (run.appr) {
+    const gA = [...ca, sa('ga5.approval.id', run.appr.apprId)];
+    if (run.apprRcpt) gA.push(sa('ga5.receipt.nonce', run.apprRcpt.nonce));
     spans.push({
-      traceId: run.traceId,
-      spanId: run.approval.aSid,
-      parentSpanId: run.agentSid,
-      name: 'approval_gate',
-      kind: 1,
-      startTimeUnixNano: ns(T + off),
-      endTimeUnixNano: ns(T + off + 10),
-      attributes: gateAttrs,
-      status: {}
+      traceId: run.tid, spanId: run.appr.gSid, parentSpanId: run.aSid,
+      name: 'approval_gate', kind: 1,
+      startTimeUnixNano: nanos(T + off), endTimeUnixNano: nanos(T + off + 10),
+      attributes: gA, status: {}
     });
   }
 
-  return {
-    resourceSpans: [{
-      scopeSpans: [{
-        spans
-      }]
-    }]
-  };
+  return { resourceSpans: [{ scopeSpans: [{ spans }] }] };
 }
 
 // ============================================================
-// GET /v2/incidents/:runId
+// GET /v2/incidents/:runId handler
 // ============================================================
 
 function getIncident(req, res) {
   const { runId } = req.params;
-  if (!store.has(runId)) {
+  if (!store.has(runId))
     return res.status(404).json({ error: 'Run not found' });
-  }
-  return res.json(store.get(runId).lastResponse);
+  return res.json(store.get(runId).lastResp);
 }
 
 module.exports = { handleIncident, handleReceipt, getIncident };
